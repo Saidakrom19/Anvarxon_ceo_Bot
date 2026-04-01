@@ -1,6 +1,11 @@
 import os
+import re
 import logging
 import tempfile
+from io import BytesIO
+from typing import Optional
+
+import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 from telegram import Update
@@ -10,160 +15,136 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+VOICE_ID = os.getenv("VOICE_ID")
+
+CONTROLLER_BOT_USERNAME = os.getenv("CONTROLLER_BOT_USERNAME", "Lazizxon_controller_Bot").lstrip("@")
+CEO_BOT_USERNAME = os.getenv("CEO_BOT_USERNAME", "Anvarxon_ceo_Bot").lstrip("@")
 
 if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN topilmadi. .env faylni tekshiring.")
+    raise ValueError("TELEGRAM_BOT_TOKEN topilmadi")
 if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY topilmadi. .env faylni tekshiring.")
+    raise ValueError("OPENAI_API_KEY topilmadi")
+if not ELEVENLABS_API_KEY:
+    raise ValueError("ELEVENLABS_API_KEY topilmadi")
+if not VOICE_ID:
+    raise ValueError("VOICE_ID topilmadi")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+logger = logging.getLogger(__name__)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-SYSTEM_PROMPT = """
-Сен дунё даражасидаги кучли CEO, стратег ва бизнес раҳбарисан.
-Сен CEO бўлсанг ҳам, компанияда барча операцион жараёнлар Назоратчи орқали амалга оширилади.
+TEAM_CONTEXT = """
+Жамоа таркиби:
 
-Сен тўғридан-тўғри мутахассислар билан ишламайсан.
+1. Анвархон — @Anvarxon_ceo_Bot — CEO, стратегия, қарор қабул қилиш, бизнес йўналиши, приоритет, масштаблаш
+2. Умаржон — @Umarjon_Marketolog_bot — маркетинг, бренд, реклама, лид генерация, позициялаш
+3. Ғайратжон — @Gayrat_Finance_Bot — молия, cash flow, харажат, фойда, нарх, маржа
+4. Исломжон — @Islomjon_Rop_Bot — РОП, сотув бўлими раҳбари, сотув тизими, скрипт, конверсия, closing
+5. Махмуджон — @Maxmudjon_hr_Bot — HR, найм, жамоа, мотивация, ходимлар самарадорлиги
+6. Расулжон — @Rasuljon_lawyer_Bot — юрист, шартнома, ҳуқуқий ҳимоя, юридик рисклар
+7. Муродхон — @Murodxon_tax_Bot — солиқ, легал оптимизация, солиқ режалаштириш
+8. Бехрузбек — @Behruz_creative_Bot — креатив директор, визуал ғоя, контент, реклама концепцияси
+9. Улуғбек — @Ulugbek_innovator_Bot — инновация, янги ғоя, MVP, автоматизация
+10. Ахли илм домла — @Domla_sharia_Bot — шаръий масалалар, ҳалол-ҳаром, шариатга мувофиқлик
+11. Лазизхон — @Lazizxon_controller_Bot — назорат, тақсимлаш, дедлайн, сифат текшируви, раҳбар ва жамоа ўртасида кўприк
+"""
 
-Бошқарув модели:
-CEO → Назоратчи → Мутахассислар
-Мутахассислар → Назоратчи → CEO
+CEO_PROMPT = f"""
+Сен Анвархон исмли AI CEOсан.
 
 Сенинг ролиң:
-- стратегия белгилаш
-- қарор қабул қилиш
-- устуворликларни аниқлаш
-- аниқ натижага йўналтирилган вазифа бериш
+- стратегия бериш
+- бизнес бўйича асосий қарорларни шакллантириш
+- устуворликларни белгилаш
+- компания учун тўғри йўналишни кўрсатиш
+- бизнес мақсадига мос ечим бериш
+- раҳбар даражасида фикрлаш
+
+Сенинг ишлаш қоидаң:
+- сен раҳбар билан тўғридан-тўғри ишламайсан
+- сен фақат Назоратчи орқали ишлайсан
+- Назоратчи йўналтирмаган вазифага жавоб бермайсан
+- сен мутахассисларга тўғридан-тўғри вазифа бермайсан
+- сен ўз жавобингни Назоратчига тақдим қиласан
+- сендан кейин бажариш жараёнини Назоратчи бошқаради
+
+Ички бошқарув тартиби:
+Раҳбар → Назоратчи → Сен
+Сен → Назоратчи → Раҳбар
+
+Назоратчи:
+Лазизхон — @{CONTROLLER_BOT_USERNAME}
 
 Сен қуйидагиларни қилмайсан:
-- вазифани кимга беришни ҳал қилмайсан
-- жараённи бошқармайсан
-- микроменежмент қилмайсан
-- мутахассисларга тўғридан-тўғри мурожаат қилмайсан
+- микроменежмент
+- операцион назорат
+- дедлайн қувиш
+- тўғридан-тўғри ижрочи билан ишлаш
 
-Бу вазифалар Назоратчига тегишли.
-
-Вазифа беришда:
-- аниқ мақсадни айт
-- натижани белгила
-- бизнес нуқтаи назаридан тушунтир
-
-"Қандай қилиш"ни айтма — буни Назоратчи ҳал қилади.
-
-Қатъий қоидалар:
-- Назоратчини четлаб ўтма
-- мутахассислар билан тўғридан ишлама
-- операцион ишларга аралашма
+Бу ишлар Назоратчига тегишли.
 
 Сенинг фикрлашинг:
 - стратегик
-- катта расмга қараган
-- натижага йўналтирилган
-
-Сенинг мақсадинг:
-- бизнесни ўсишга олиб чиқиш
-- тизим орқали ишлаш
-- вақтни стратегияга сарфлаш
-
-Сен раҳбарсан, лекин сен ҳам тизим орқали ишлайсан.
-
-Сен қуйидаги йўналишларда юқори даражали экспертсан:
-- бизнес стратегия
-- масштаблаш
-- бозорга кириш
-- рақобат устунлиги
-- қарор қабул қилиш
-- ресурс тақсимоти
-- жамоани бошқариш
-- бизнес модел яратиш
-- инвестициявий фикрлаш
-- риск бошқаруви
-- фокус ва приоритет белгилаш
-- даромад ўсиши ва узоқ муддатли позициялаш
-
-Сенинг асосий вазифанг:
-- тадбиркорга асосий бизнес муаммони аниқлашда ёрдам бериш
-- бизнес учун тўғри стратегик қарор бериш
-- қисқа ва узоқ муддатли йўналишни белгилаш
-- компанияни ўсиш нуқтасига олиб чиқиш
-- нотўғри ҳаракатлардан қайтариш
-- бизнесни тизимли ва масштабланувчи қилиш
-
-Сенинг фикрлашинг:
-- стратегик
-- юқори даражали
-- натижага йўналтирилган
-- бозор ва рақобатни ҳис қиладиган
-- капитал самарадорлигини ўйлайдиган
-- қаттиқ приоритет қўя оладиган
+- аниқ
+- бизнес мантиғига асосланган
+- натижага қаратилган
+- приоритетни яхши ажратадиган
 
 Жавоб бериш қоидалари:
-1. Жавоблар аниқ, стратегик ва амалий бўлсин.
-2. Кераксиз назария ёзма.
-3. Ҳар бир жавоб бизнес эгасига қарор қабул қилишда ёрдам берсин.
-4. Иложи бўлса қадам-бақадам йўл харитаси бер.
-5. Фойда, ўсиш, риск ва масштаб нуқтаи назаридан фикр билдир.
-6. Жавоблар фақат ўзбек тилида, кирилл алифбосида бўлсин.
-7. Лотин алифбосидан фойдаланма.
-8. Агар маълумот етарли бўлмаса, аввал 3 тагача аниқлаштирувчи савол бер.
-9. Муаммони қуйидаги нуқталар бўйича таҳлил қил:
-   - бизнес модел
-   - бозор
-   - рақобат
-   - жамоа
-   - ресурс
-   - execution
-   - фокус
-   - даромад механизми
+- жавоблар фақат ўзбек тилида, кирилл алифбосида бўлсин
+- жавоблар қисқа, кучли ва стратегик бўлсин
+- кераксиз назария ёзма
+- CEO сифатида қарор ва йўналиш бер
+- агар маълумот етарли бўлмаса, 3 тагача аниқлаштирувчи савол бер
+- сен раҳбарга эмас, Назоратчига жавоб бераётгандек ёз
 
-Агар фойдаланувчи CEO даражасида маслаҳат сўраса, жавобни қуйидаги форматда бер:
-1. Вазият таҳлили
-2. Асосий стратегик муаммо
-3. Муаммо сабаблари
-4. Стратегик ечим
-5. 3-7 та амалий қадам
-6. Кутиладиган натижа
-7. Асосий рисклар
+Жавоб формати:
+1. CEO таҳлили
+2. Асосий қарор
+3. Стратегик йўналиш
+4. 3-5 амалий қадам
+5. Эҳтимолий рисклар
 
-Агар фойдаланувчи янги йўналиш, бозор ёки компания ўсиши ҳақида сўраса:
-- бозор имконияти
-- қайси сегментга кириш
-- қандай позициялаш
-- қайси ресурслар керак
-- биринчи амалий қадам
-- қандай KPI кузатиш
-бўйича фикр бер.
-
-Сенинг мақсадинг:
-- бизнес эгасига аниқ йўналиш бериш
-- нотўғри қарорлар сонини камайтириш
-- компанияни масштаблаш учун тўғри база қуриш
-- тизимли ва кучли бизнес яратиш
-
-Сен оддий менежер эмассан.
-Сен бизнес эгаси учун стратегик CEOсан.
+Қўшимча контекст:
+{TEAM_CONTEXT}
 """
-def wants_text_reply(user_message: str) -> bool:
-    text = user_message.lower()
 
-    triggers = [
-        "матнда жавоб бер",
-        "матнли жавоб бер",
-        "матнда ёз",
-        "матнда ёзиб бер",
-        "ёзма жавоб бер",
-        "текст қилиб бер",
-        "text qilib ber",
-        "matnda javob ber",
-        "matnli javob ber",
-        "yozma javob ber",
-    ]
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
-    return any(trigger in text for trigger in triggers)
+def message_mentions_bot(text: str, bot_username: str) -> bool:
+    if not text:
+        return False
+    return f"@{bot_username.lower()}" in text.lower()
+
+def should_ceo_reply(update: Update) -> bool:
+    if not update.message:
+        return False
+
+    txt = update.message.text or update.message.caption or ""
+    from_username = (update.effective_user.username or "").lower()
+
+    if from_username == CONTROLLER_BOT_USERNAME.lower() and message_mentions_bot(txt, CEO_BOT_USERNAME):
+        return True
+
+    if from_username == CONTROLLER_BOT_USERNAME.lower() and update.message.reply_to_message:
+        reply_from = update.message.reply_to_message.from_user
+        if reply_from and (reply_from.username or "").lower() == CEO_BOT_USERNAME.lower():
+            return True
+
+    return False
+
+def extract_task_from_controller_message(text: str) -> str:
+    if not text:
+        return ""
+
+    cleaned = text.replace(f"@{CEO_BOT_USERNAME}", "").strip()
+    return cleaned
 
 def speech_to_text(audio_file_path: str) -> str:
     with open(audio_file_path, "rb") as audio_file:
@@ -173,90 +154,90 @@ def speech_to_text(audio_file_path: str) -> str:
         )
     return (transcription.text or "").strip()
 
-def generate_ai_reply(user_message: str) -> str:
+def elevenlabs_text_to_speech(text: str) -> BytesIO:
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}?output_format=mp3_44100_128"
+
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    data = {
+        "text": text[:2500],
+        "model_id": "eleven_multilingual_v2",
+    }
+
+    response = requests.post(url, json=data, headers=headers, timeout=120)
+
+    if response.status_code != 200:
+        raise RuntimeError(f"ElevenLabs xatolik: {response.status_code} | {response.text}")
+
+    audio = BytesIO(response.content)
+    audio.name = "voice.mp3"
+    audio.seek(0)
+    return audio
+
+async def send_voice_reply(update: Update, text: str):
+    try:
+        audio_file = elevenlabs_text_to_speech(text)
+        await update.message.reply_voice(voice=audio_file)
+    except Exception as e:
+        logger.exception("CEO ElevenLabs ovozli javob xatosi")
+        await update.message.reply_text(f"Хатолик юз берди: {str(e)}")
+
+def generate_ceo_reply(user_message: str) -> str:
     response = client.responses.create(
         model="gpt-4o-mini",
         input=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": CEO_PROMPT},
             {"role": "user", "content": user_message},
         ],
     )
 
     reply = response.output_text.strip() if response.output_text else ""
     if not reply:
-        reply = "Жавоб тайёр бўлмади. Илтимос, саволни қайта юборинг."
+        reply = "CEO жавоби тайёр бўлмади."
     return reply
 
-async def send_voice_reply(update: Update, text: str):
-    temp_audio_path = None
-    try:
-        safe_text = text[:1500] if text else "Жавоб тайёр бўлмади."
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
-            temp_audio_path = temp_audio.name
-
-        speech_response = client.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice="alloy",
-            input=safe_text,
-        )
-        speech_response.stream_to_file(temp_audio_path)
-
-        with open(temp_audio_path, "rb") as audio_file:
-            await update.message.reply_voice(voice=audio_file)
-
-    except Exception as e:
-        logging.exception("Ovozli javob yuborishda xatolik")
-        await update.message.reply_text(f"Хатолик юз берди: {str(e)}")
-    finally:
-        if temp_audio_path and os.path.exists(temp_audio_path):
-            os.remove(temp_audio_path)
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "Салом! Мен Анвархон ижрочи директорман.\n\n"
-        "Мен одатда сизга фақат овозли жавоб бераман.\n"
-        "Агар матнли жавоб керак бўлса, хабарингизда:\n"
-        "\"матнда жавоб бер\" деб ёзинг."
+    await update.message.reply_text(
+        "Салом. Мен Анвархон CEO ботман.\n"
+        "Мен фақат Назоратчи орқали келган вазифаларга стратегик жавоб бераман."
     )
-    await update.message.reply_text(welcome_text)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = (
-        "Фойдаланиш:\n\n"
-        "1. Матн ёки овозли хабар юборинг\n"
-        "2. Бот одатда фақат овозли жавоб қайтаради\n"
-        "3. Агар матнли жавоб керак бўлса, \"матнда жавоб бер\" деб ёзинг\n\n"
-        "Мисол:\n"
-        "Матнда жавоб бер. Реклама бор, лекин сотув йўқ. Муаммони таҳлил қил."
+    await update.message.reply_text(
+        f"Ишлаш тартиби:\n"
+        f"1. Раҳбар тўғридан-тўғри менга вазифа бермайди\n"
+        f"2. Назоратчи @{CONTROLLER_BOT_USERNAME} мени йўналтиради\n"
+        f"3. Мен CEO сифатида стратегия ва қарор бўйича жавоб бераман\n"
+        f"4. Ижро ва назоратни Назоратчи давом эттиради"
     )
-    await update.message.reply_text(help_text)
 
-async def respond_based_on_mode(update: Update, user_message: str):
-    reply = generate_ai_reply(user_message)
-
-    if wants_text_reply(user_message):
-        await update.message.reply_text(reply)
-    else:
-        await send_voice_reply(update, reply)
-
-async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
-
-    user_message = update.message.text.strip()
-
-    try:
-        await respond_based_on_mode(update, user_message)
-    except Exception as e:
-        logging.exception("Matnli xabarda xatolik")
-        await update.message.reply_text(f"Хатолик юз берди: {str(e)}")
-
-async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.voice:
+    if not should_ceo_reply(update):
         return
 
-    temp_ogg_path = None
+    try:
+        task_text = extract_task_from_controller_message(normalize_text(update.message.text))
+        reply = generate_ceo_reply(task_text)
+
+        await update.message.reply_text(reply)
+        await send_voice_reply(update, reply)
+
+    except Exception as e:
+        logger.exception("CEO text error")
+        await update.message.reply_text(f"Хатолик юз берди: {str(e)}")
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.voice:
+        return
+    if not should_ceo_reply(update):
+        return
+
+    temp_ogg_path: Optional[str] = None
 
     try:
         voice_file = await context.bot.get_file(update.message.voice.file_id)
@@ -269,13 +250,16 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         user_text = speech_to_text(temp_ogg_path)
 
         if not user_text:
-            await update.message.reply_text("Овозли хабар тушунилмади. Илтимос, қайта юборинг.")
+            await update.message.reply_text("Овозли вазифа тушунилмади.")
             return
 
-        await respond_based_on_mode(update, user_text)
+        reply = generate_ceo_reply(user_text)
+
+        await update.message.reply_text(reply)
+        await send_voice_reply(update, reply)
 
     except Exception as e:
-        logging.exception("Ovozli xabarda xatolik")
+        logger.exception("CEO voice error")
         await update.message.reply_text(f"Хатолик юз берди: {str(e)}")
     finally:
         if temp_ogg_path and os.path.exists(temp_ogg_path):
@@ -286,11 +270,11 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("Bot ishga tushdi...")
-    app.run_polling()
+    logger.info("CEO bot ishga tushdi...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
